@@ -1,0 +1,118 @@
+pipeline:
+  name: parallel-security-scan
+  identifier: parallel_security_scan
+  projectIdentifier: <+input>
+  orgIdentifier: <+input>
+  tags: {}
+  stages:
+    - stage:
+        name: Multi-Scanner Security Stage
+        identifier: multi_scanner_security_stage
+        description: Run Snyk, Aqua Trivy, and Zap in parallel using a native STO step group
+        type: SecurityTests
+        spec:
+          # Harness Cloud — no infrastructure setup required
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              # ── Parallel Step Group: all three scanners run simultaneously ──
+              - stepGroup:
+                  name: Parallel Scanners
+                  identifier: parallel_scanners
+                  # No stepGroupInfra here — inherits stage infrastructure
+                  steps:
+                    - parallel:
+                        # ── Scanner 1: Snyk — open source dependency scanning ─────────
+                        # Scans package manifests (package.json, pom.xml, requirements.txt)
+                        # for known CVEs in third-party dependencies
+                        - step:
+                            type: Snyk
+                            name: snyk_sca_scan
+                            identifier: snyk_sca_scan
+                            spec:
+                              mode: orchestration      # Snyk runs and results are ingested in one step
+                              config: default          # Snyk Open Source (dependency scanning)
+                              target:
+                                type: repository
+                                detect: auto           # Auto-detects repo name and branch from git
+                              auth:
+                                access_token: <+secrets.getValue("snyk_api_token")>
+                              advanced:
+                                log:
+                                  level: info
+                                fail_on_severity: high
+
+                        # ── Scanner 2: Aqua Trivy — container image CVE scanning ──────
+                        # Scans OS packages and application dependencies inside a container image
+                        - step:
+                            type: AquaTrivy
+                            name: trivy_container_scan
+                            identifier: trivy_container_scan
+                            spec:
+                              mode: orchestration      # Trivy runs and results are ingested in one step
+                              config: default
+                              target:
+                                type: container
+                                name: <+stage.variables.IMAGE_NAME>
+                                variant: <+stage.variables.IMAGE_TAG>
+                              image:
+                                type: registry          # Pull from a registry; use local_image if built earlier in same pipeline
+                                name: <+stage.variables.IMAGE_NAME>
+                                tag: <+stage.variables.IMAGE_TAG>
+                                access_id: <+secrets.getValue("docker_username")>
+                                access_token: <+secrets.getValue("docker_password")>
+                              privileged: true
+                              advanced:
+                                log:
+                                  level: info
+                                fail_on_severity: critical  # Block on Critical container CVEs only
+
+                        # ── Scanner 3: Zap — DAST web application scanning ────────────
+                        # Scans a running web app by simulating HTTP attacks
+                        # Requires a deployed application — cannot scan code or container images
+                        - step:
+                            type: Zap
+                            name: zap_dast_scan
+                            identifier: zap_dast_scan
+                            spec:
+                              mode: orchestration      # Zap runs and results are ingested in one step
+                              config: standard         # standard | attack | quick | default
+                              target:
+                                type: instance
+                                name: <+stage.variables.APP_URL>
+                                variant: <+stage.variables.APP_ENV>
+                              instance:
+                                domain: <+stage.variables.APP_URL>
+                                protocol: https
+                              advanced:
+                                log:
+                                  level: info
+                                fail_on_severity: high
+
+          # ── Stage Variables ────────────────────────────────────────────────
+        variables:
+          - name: IMAGE_NAME
+            type: String
+            description: Container image name to scan with Trivy (e.g., myorg/myapp)
+            required: true
+            value: <+input>
+          - name: IMAGE_TAG
+            type: String
+            description: Container image tag to scan (e.g., 1.0.0)
+            required: true
+            value: <+input>
+          - name: APP_URL
+            type: String
+            description: Base URL of the deployed web app for ZAP DAST scan (e.g., https://myapp.dev.internal)
+            required: true
+            value: <+input>
+          - name: APP_ENV
+            type: String
+            description: Environment label used as the ZAP scan target variant (e.g., dev, staging)
+            required: false
+            value: dev
