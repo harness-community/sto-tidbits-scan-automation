@@ -1,5 +1,5 @@
 # [Trivy] Deliberately old pinned versions with known CVEs.
 Flask==1.1.2
 Werkzeug==1.0.1
-Jinja2==2.11.2
+Jinja2==3.1.6
 requests==2.19.0
