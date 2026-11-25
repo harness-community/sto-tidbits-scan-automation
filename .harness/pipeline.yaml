@@ -1,118 +1,154 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# STO Tidbit: Scan Automation
+#
+# Flow (ONE stage, three steps in order):
+#   1. Code scans  : Gitleaks + Semgrep run IN PARALLEL on the repo
+#   2. Build/Push  : Dockerfile at repo root -> Harness Artifact Registry (HAR)
+#   3. Image scan  : Aqua Trivy scans the image that was just pushed to HAR
+#
+# Scanners used (and nothing else): Gitleaks, Semgrep, Aqua Trivy.
+# Docs:
+#   Gitleaks  https://developer.harness.io/security-testing-orchestration/use-sto/sto-scanner-configuration/gitleaks-scanner-reference
+#   Semgrep   https://developer.harness.io/security-testing-orchestration/use-sto/sto-scanner-configuration/semgrep/semgrep-scanner-reference
+#   Trivy     https://developer.harness.io/security-testing-orchestration/use-sto/sto-scanner-configuration/trivy/aqua-trivy-scanner-reference
+#   HAR + CI  https://developer.harness.io/artifact-registry/use-artifact-registry/platform-integrations/ci-ar-integrations
+# ─────────────────────────────────────────────────────────────────────────────
 pipeline:
   name: parallel-security-scan
   identifier: parallel_security_scan
   projectIdentifier: <+input>
   orgIdentifier: <+input>
   tags: {}
+
+  # Codebase = this repo. Stages with `cloneCodebase: true` clone it into /harness.
+  # The sample app (app.py, requirements.txt, Dockerfile) lives at the repo root,
+  # so /harness IS the app directory.
+  properties:
+    ci:
+      codebase:
+        repoName: <+input> # e.g. sto-tidbits-scan-automation
+        build: <+input> # branch / tag / PR chosen at run time
+
+  # ── Pipeline variables (shared by all stages) ────────────────────────────────
+  variables:
+    - name: HAR_REGISTRY
+      type: String
+      description: Name of the Docker registry in Harness Artifact Registry (e.g., sample-docker-registry)
+      required: true
+      value: <+input>
+    - name: IMAGE_NAME
+      type: String
+      description: Image name inside the registry
+      required: false
+      value: sto-sample-app
+    - name: IMAGE_TAG
+      type: String
+      description: Image tag. Defaults to the pipeline execution number so every run is unique
+      required: false
+      value: <+pipeline.sequenceId>
+
   stages:
+    # A CI (Build) stage can run STO scan steps alongside build steps, so the whole
+    # flow fits in one stage on Harness Cloud — no extra stages or infrastructure.
     - stage:
-        name: Multi-Scanner Security Stage
-        identifier: multi_scanner_security_stage
-        description: Run Snyk, Aqua Trivy, and Zap in parallel using a native STO step group
-        type: SecurityTests
+        name: Scan and Build
+        identifier: scan_and_build
+        description: Gitleaks + Semgrep in parallel, build and push to HAR, then Trivy image scan
+        type: CI
         spec:
-          # Harness Cloud — no infrastructure setup required
+          cloneCodebase: true # Scanners and the Docker build need the source in /harness
           platform:
             os: Linux
             arch: Amd64
-          runtime:
+          runtime: # Harness Cloud — no infrastructure setup required
             type: Cloud
             spec: {}
           execution:
             steps:
-              # ── Parallel Step Group: all three scanners run simultaneously ──
+              # ── Step 1: code scans, run in parallel ────────────────────────────
               - stepGroup:
-                  name: Parallel Scanners
-                  identifier: parallel_scanners
-                  # No stepGroupInfra here — inherits stage infrastructure
+                  name: Parallel Code Scanners
+                  identifier: parallel_code_scanners
                   steps:
+                    # `parallel:` makes every child step start at the same time.
                     - parallel:
-                        # ── Scanner 1: Snyk — open source dependency scanning ─────────
-                        # Scans package manifests (package.json, pom.xml, requirements.txt)
-                        # for known CVEs in third-party dependencies
+                        # Gitleaks: hardcoded secrets (app.py has a fake token)
                         - step:
-                            type: Snyk
-                            name: snyk_sca_scan
-                            identifier: snyk_sca_scan
+                            type: Gitleaks
+                            name: gitleaks_secrets_scan
+                            identifier: gitleaks_secrets_scan
                             spec:
-                              mode: orchestration      # Snyk runs and results are ingested in one step
-                              config: default          # Snyk Open Source (dependency scanning)
-                              target:
-                                type: repository
-                                detect: auto           # Auto-detects repo name and branch from git
-                              auth:
-                                access_token: <+secrets.getValue("snyk_api_token")>
-                              advanced:
-                                log:
-                                  level: info
-                                fail_on_severity: high
-
-                        # ── Scanner 2: Aqua Trivy — container image CVE scanning ──────
-                        # Scans OS packages and application dependencies inside a container image
-                        - step:
-                            type: AquaTrivy
-                            name: trivy_container_scan
-                            identifier: trivy_container_scan
-                            spec:
-                              mode: orchestration      # Trivy runs and results are ingested in one step
+                              mode: orchestration # run the scan AND ingest results in one step
                               config: default
                               target:
-                                type: container
-                                name: <+stage.variables.IMAGE_NAME>
-                                variant: <+stage.variables.IMAGE_TAG>
-                              image:
-                                type: registry          # Pull from a registry; use local_image if built earlier in same pipeline
-                                name: <+stage.variables.IMAGE_NAME>
-                                tag: <+stage.variables.IMAGE_TAG>
-                                access_id: <+secrets.getValue("docker_username")>
-                                access_token: <+secrets.getValue("docker_password")>
-                              privileged: true
+                                type: repository
+                                detection: manual
+                                name: sto-tidbits-scan-automation
+                                variant: <+codebase.branch> # STO tracks findings per branch
                               advanced:
                                 log:
                                   level: info
-                                fail_on_severity: critical  # Block on Critical container CVEs only
+                                fail_on_severity: critical # Gitleaks has no true severities; keep the gate permissive for the demo
 
-                        # ── Scanner 3: Zap — DAST web application scanning ────────────
-                        # Scans a running web app by simulating HTTP attacks
-                        # Requires a deployed application — cannot scan code or container images
+                        # Semgrep: static analysis (SQLi, command injection, debug mode)
                         - step:
-                            type: Zap
-                            name: zap_dast_scan
-                            identifier: zap_dast_scan
+                            type: Semgrep
+                            name: semgrep_sast_scan
+                            identifier: semgrep_sast_scan
                             spec:
-                              mode: orchestration      # Zap runs and results are ingested in one step
-                              config: standard         # standard | attack | quick | default
+                              mode: orchestration
+                              config: default
                               target:
-                                type: instance
-                                name: <+stage.variables.APP_URL>
-                                variant: <+stage.variables.APP_ENV>
-                              instance:
-                                domain: <+stage.variables.APP_URL>
-                                protocol: https
+                                type: repository
+                                detection: manual
+                                name: sto-tidbits-scan-automation
+                                variant: <+codebase.branch>
                               advanced:
                                 log:
                                   level: info
-                                fail_on_severity: high
+                                fail_on_severity: high # fail the pipeline on High or Critical findings
 
-          # ── Stage Variables ────────────────────────────────────────────────
-        variables:
-          - name: IMAGE_NAME
-            type: String
-            description: Container image name to scan with Trivy (e.g., myorg/myapp)
-            required: true
-            value: <+input>
-          - name: IMAGE_TAG
-            type: String
-            description: Container image tag to scan (e.g., 1.0.0)
-            required: true
-            value: <+input>
-          - name: APP_URL
-            type: String
-            description: Base URL of the deployed web app for ZAP DAST scan (e.g., https://myapp.dev.internal)
-            required: true
-            value: <+input>
-          - name: APP_ENV
-            type: String
-            description: Environment label used as the ZAP scan target variant (e.g., dev, staging)
-            required: false
-            value: dev
+              # ── Step 2: build the Dockerfile and push to Harness Artifact Registry ─
+              # NOTE: With HAR selected as the registry type, no Docker connector is
+              # needed — the pipeline's own identity authenticates to HAR.
+              # NOTE: The Harness docs describe this via the UI ("Build and Push an image
+              # to Docker Registry" -> registry type "Harness Artifact Registry") but do not
+              # publish the YAML. If validation fails on `registryRef`, build the step once
+              # in the Pipeline Studio visual editor and copy the generated YAML.
+              - step:
+                  type: BuildAndPushDockerRegistry
+                  name: build_and_push_to_har
+                  identifier: build_and_push_to_har
+                  spec:
+                    registryRef: <+pipeline.variables.HAR_REGISTRY> # HAR registry to push to
+                    repo: <+pipeline.variables.IMAGE_NAME> # image name inside the registry
+                    tags:
+                      - <+pipeline.variables.IMAGE_TAG>
+                    dockerfile: Dockerfile # root-level Dockerfile of the sample app
+                    context: . # repo root = build context
+
+              # ── Step 3: scan the pushed image with Aqua Trivy ──────────────────
+              # No Docker-in-Docker background step: on Harness Cloud Trivy pulls the
+              # image straight from the registry (image.type: docker_v2).
+              - step:
+                  type: AquaTrivy
+                  name: trivy_container_scan
+                  identifier: trivy_container_scan
+                  spec:
+                    mode: orchestration
+                    config: default
+                    target:
+                      type: container
+                      detection: manual
+                      name: <+pipeline.variables.IMAGE_NAME>
+                      variant: <+pipeline.variables.IMAGE_TAG>
+                    image:
+                      type: harness # pull from a HAR registry
+                      registry: <+pipeline.variables.HAR_REGISTRY>
+                      image_path: <+pipeline.variables.IMAGE_NAME>
+                      tag: <+pipeline.variables.IMAGE_TAG>
+                    privileged: true
+                    advanced:
+                      log:
+                        level: info
+                      fail_on_severity: critical # block only on Critical CVEs
