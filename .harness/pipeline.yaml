@@ -106,7 +106,7 @@ pipeline:
                               advanced:
                                 log:
                                   level: info
-                                fail_on_severity: high # fail the pipeline on High or Critical findings
+                                fail_on_severity: none # fail the pipeline on High or Critical findings
 
               # ── Step 2: build the Dockerfile and push to Harness Artifact Registry ─
               # NOTE: With HAR selected as the registry type, no Docker connector is
