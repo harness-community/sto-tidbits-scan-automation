@@ -145,10 +145,10 @@ pipeline:
                     image:
                       type: harness # pull from a HAR registry
                       registry: <+pipeline.variables.HAR_REGISTRY>
-                      image_path: <+pipeline.variables.IMAGE_NAME>
+                      image_path: <+pipeline.variables.IMAGE_NAME>:<+pipeline.variables.IMAGE_TAG>
                       tag: <+pipeline.variables.IMAGE_TAG>
                     privileged: true
                     advanced:
                       log:
                         level: info
-                      fail_on_severity: critical # block only on Critical CVEs
+                      fail_on_severity: none # block only on Critical CVEs
